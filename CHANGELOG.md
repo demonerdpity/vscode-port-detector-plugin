@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.0.2
+
+- Switched the panel to search-first rendering instead of scanning on open.
+- Improved Windows native port lookup with structured PowerShell commands.
+- Refined environment switching and exact port filtering behavior.
+
 ## 0.0.1
 
 - Initial release of `Port Inspector`.

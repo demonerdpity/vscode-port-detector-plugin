@@ -2,7 +2,7 @@
   "name": "port-inspector",
   "displayName": "Port Inspector",
   "description": "Inspect occupied ports in the current environment, switch targets when needed, and stop the owning process after confirmation.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "clioc",
   "author": "clioc <1393757480@qq.com>",
   "engines": {
