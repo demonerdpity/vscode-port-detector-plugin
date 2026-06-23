@@ -1,0 +1,53 @@
+{
+  "name": "port-inspector",
+  "displayName": "Port Inspector",
+  "description": "Inspect occupied ports in the current environment, switch targets when needed, and stop the owning process after confirmation.",
+  "version": "0.0.1",
+  "publisher": "demonerdpity",
+  "author": "cc <1393757480@qq.com>",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "port",
+    "process",
+    "wsl",
+    "linux",
+    "windows"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:portInspector.open",
+    "onCommand:portInspector.refresh"
+  ],
+  "main": "./src/extension.js",
+  "homepage": "https://github.com/demonerdpity/vscode-port-detector-plugin",
+  "bugs": {
+    "url": "https://github.com/demonerdpity/vscode-port-detector-plugin/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/demonerdpity/vscode-port-detector-plugin.git"
+  },
+  "scripts": {
+    "check": "node --check src/extension.js && node --check src/portRegistry.js && node --check media/main.js"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "portInspector.open",
+        "title": "Port Inspector: Open"
+      },
+      {
+        "command": "portInspector.refresh",
+        "title": "Port Inspector: Refresh"
+      }
+    ]
+  }
+}
