@@ -6,14 +6,16 @@
     environmentLabel: "",
     environmentOptions: [],
     environmentSelection: "auto",
+    hasSearched: false,
     loading: false,
+    searchQuery: "",
     statusLevel: "info",
     statusText: "Ready."
   };
 
   const elements = {
     portInput: document.getElementById("port-input"),
-    refreshButton: document.getElementById("refresh-button"),
+    searchButton: document.getElementById("search-button"),
     clearButton: document.getElementById("clear-button"),
     summaryText: document.getElementById("summary-text"),
     statusText: document.getElementById("status-text"),
@@ -43,7 +45,7 @@
       return [];
     }
 
-    return state.entries.filter(entry => String(entry.port).includes(query));
+    return state.entries.filter(entry => String(entry.port) === query);
   }
 
   function renderEnvironmentSelector() {
@@ -70,7 +72,7 @@
 
   function render() {
     const filterValue = getFilterValue();
-    const invalidFilter = filterValue && !/^\d+$/.test(filterValue);
+    const invalidFilter = Boolean(filterValue) && !/^\d+$/.test(filterValue);
     const visibleEntries = invalidFilter ? [] : getVisibleEntries();
 
     renderEnvironmentSelector();
@@ -79,13 +81,18 @@
     elements.statusText.textContent = state.statusText;
 
     if (invalidFilter) {
-      elements.summaryText.textContent = `Showing 0 of ${state.entries.length} ports.`;
-      setStatus("warning", "Port search only accepts digits.");
+      elements.summaryText.textContent = "Search input is invalid.";
       renderEmptyRow("Invalid filter. Use digits only.");
       return;
     }
 
-    elements.summaryText.textContent = `Showing ${visibleEntries.length} of ${state.entries.length} ports.`;
+    if (!state.hasSearched) {
+      elements.summaryText.textContent = "No search executed yet.";
+      renderEmptyRow("Enter a port number and click Search.");
+      return;
+    }
+
+    elements.summaryText.textContent = `Showing ${visibleEntries.length} of ${state.entries.length} port records for ${state.searchQuery || filterValue}.`;
 
     if (state.statusLevel === "error") {
       renderEmptyRow(state.statusText || "Failed to load port data.");
@@ -93,13 +100,7 @@
     }
 
     if (!state.loading && !visibleEntries.length) {
-      if (state.entries.length) {
-        setStatus("info", "No ports match the current filter.");
-        renderEmptyRow("No matching ports.");
-      } else {
-        setStatus("info", "No listening or bound ports were found.");
-        renderEmptyRow("No port records available.");
-      }
+      renderEmptyRow(`No port records found for ${state.searchQuery || filterValue}.`);
       return;
     }
 
@@ -150,16 +151,55 @@
     elements.tableBody.appendChild(row);
   }
 
+  function runSearch() {
+    const query = getFilterValue();
+
+    if (!query) {
+      state.entries = [];
+      state.hasSearched = false;
+      state.searchQuery = "";
+      setStatus("info",         `Enter a port number to search in ${state.environmentLabel || "the selected environment"}.`
+      );
+      render();
+      vscode.postMessage({
+        type: "searchPorts",
+        payload: {
+          portQuery: ""
+        }
+      });
+      return;
+    }
+
+    if (!/^\d+$/.test(query)) {
+      setStatus("warning", "Port search only accepts digits.");
+      render();
+      return;
+    }
+
+    vscode.postMessage({
+      type: "searchPorts",
+      payload: {
+        portQuery: query
+      }
+    });
+  }
+
   function requestData() {
     vscode.postMessage({ type: "requestData" });
   }
 
-  elements.refreshButton.addEventListener("click", requestData);
+  elements.searchButton.addEventListener("click", runSearch);
   elements.clearButton.addEventListener("click", () => {
     elements.portInput.value = "";
-    render();
+    runSearch();
   });
   elements.portInput.addEventListener("input", render);
+  elements.portInput.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      runSearch();
+    }
+  });
   elements.environmentSelect.addEventListener("change", () => {
     vscode.postMessage({
       type: "setEnvironmentSelection",
@@ -175,11 +215,11 @@
     switch (message?.type) {
       case "loading":
         state.loading = Boolean(message.payload?.active);
-        elements.refreshButton.disabled = state.loading;
+        elements.searchButton.disabled = state.loading;
         elements.clearButton.disabled = state.loading;
         elements.portInput.disabled = state.loading;
         if (state.loading) {
-          setStatus("info", "Refreshing port data...");
+          setStatus("info", "Searching port data...");
         }
         render();
         break;
@@ -191,6 +231,9 @@
           ? message.payload.environmentOptions
           : [];
         state.environmentSelection = message.payload?.environmentSelection || "auto";
+        state.hasSearched = Boolean(message.payload?.hasSearched);
+        state.searchQuery = message.payload?.searchQuery || "";
+        elements.portInput.value = state.searchQuery;
         if (state.statusLevel === "error") {
           state.statusLevel = "info";
           state.statusText = "Ready.";

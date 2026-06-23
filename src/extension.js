@@ -8,6 +8,7 @@ class PortInspectorPanelController {
     this.extensionUri = context.extensionUri;
     this.panel = null;
     this.environmentSelection = context.workspaceState.get(ENV_SELECTION_KEY) || "auto";
+    this.lastSearchQuery = "";
     this.latestEnvironmentState = null;
   }
 
@@ -39,6 +40,7 @@ class PortInspectorPanelController {
 
     this.panel.onDidDispose(() => {
       this.panel = null;
+      this.lastSearchQuery = "";
       this.latestEnvironmentState = null;
     });
 
@@ -46,6 +48,9 @@ class PortInspectorPanelController {
       switch (message?.type) {
         case "requestData":
           await this.refresh();
+          break;
+        case "searchPorts":
+          await this.setSearchQuery(message.payload?.portQuery);
           break;
         case "setEnvironmentSelection":
           await this.setEnvironmentSelection(message.payload?.selectionId);
@@ -57,6 +62,11 @@ class PortInspectorPanelController {
           break;
       }
     });
+  }
+
+  async setSearchQuery(portQuery) {
+    this.lastSearchQuery = normalizePortQuery(portQuery);
+    await this.refresh();
   }
 
   async setEnvironmentSelection(selectionId) {
@@ -74,10 +84,14 @@ class PortInspectorPanelController {
       return;
     }
 
-    this.postMessage({
-      type: "loading",
-      payload: { active: true }
-    });
+    const hasSearchQuery = Boolean(normalizePortQuery(this.lastSearchQuery));
+
+    if (hasSearchQuery) {
+      this.postMessage({
+        type: "loading",
+        payload: { active: true }
+      });
+    }
 
     try {
       const runtimeContext = getRuntimeContext();
@@ -90,7 +104,37 @@ class PortInspectorPanelController {
         await this.context.workspaceState.update(ENV_SELECTION_KEY, environmentState.selectedId);
       }
 
-      const entries = await listPortRecords(environmentState.activeTarget, runtimeContext);
+      const searchQuery = normalizePortQuery(this.lastSearchQuery);
+      if (searchQuery !== this.lastSearchQuery) {
+        this.lastSearchQuery = searchQuery;
+      }
+
+      if (!searchQuery) {
+        this.postMessage({
+          type: "data",
+          payload: {
+            entries: [],
+            environmentHint: environmentState.hint,
+            environmentLabel: environmentState.environmentLabel,
+            environmentOptions: environmentState.options,
+            environmentSelection: environmentState.selectedId,
+            hasSearched: false,
+            searchQuery: ""
+          }
+        });
+        this.postMessage({
+          type: "status",
+          payload: {
+            level: "info",
+            text: `Enter a port number to search in ${environmentState.environmentLabel}.`
+          }
+        });
+        return;
+      }
+
+      const entries = await listPortRecords(environmentState.activeTarget, runtimeContext, {
+        portQuery: Number.parseInt(searchQuery, 10)
+      });
       const fallbackOnly =
         entries.length > 0 && entries.every(entry => entry.dataSource === "fallback");
 
@@ -101,20 +145,33 @@ class PortInspectorPanelController {
           environmentHint: environmentState.hint,
           environmentLabel: environmentState.environmentLabel,
           environmentOptions: environmentState.options,
-          environmentSelection: environmentState.selectedId
+          environmentSelection: environmentState.selectedId,
+          hasSearched: true,
+          searchQuery
         }
       });
+
+      if (!entries.length) {
+        this.postMessage({
+          type: "status",
+          payload: {
+            level: "info",
+            text: `No port records found for ${searchQuery} in ${environmentState.environmentLabel}.`
+          }
+        });
+        return;
+      }
 
       this.postMessage({
         type: "status",
         payload: fallbackOnly
           ? {
               level: "warning",
-              text: `Loaded ${entries.length} detected TCP port${entries.length === 1 ? "" : "s"} from ${environmentState.environmentLabel}. Restricted mode: PID mapping and Stop are unavailable.`
+              text: `Detected ${entries.length} port entr${entries.length === 1 ? "y" : "ies"} for ${searchQuery} in ${environmentState.environmentLabel}. Restricted mode: PID mapping and Stop are unavailable.`
             }
           : {
               level: "info",
-              text: `Loaded ${entries.length} port entr${entries.length === 1 ? "y" : "ies"} from ${environmentState.environmentLabel}.`
+              text: `Loaded ${entries.length} port entr${entries.length === 1 ? "y" : "ies"} for ${searchQuery} in ${environmentState.environmentLabel}.`
             }
       });
     } catch (error) {
@@ -127,10 +184,12 @@ class PortInspectorPanelController {
         }
       });
     } finally {
-      this.postMessage({
-        type: "loading",
-        payload: { active: false }
-      });
+      if (hasSearchQuery) {
+        this.postMessage({
+          type: "loading",
+          payload: { active: false }
+        });
+      }
     }
   }
 
@@ -221,7 +280,7 @@ class PortInspectorPanelController {
         <div class="title-group">
           <div class="eyebrow">Current Environment</div>
           <h1>Port Inspector</h1>
-          <div class="subtitle">Inspect listening ports and terminate the owning process after confirmation.</div>
+          <div class="subtitle">Search a port in the selected environment and inspect the matching listener information.</div>
         </div>
         <div class="environment-panel">
           <div class="environment-title">Environment</div>
@@ -233,16 +292,16 @@ class PortInspectorPanelController {
       <section class="controls-strip">
         <label class="field-group" for="port-input">
           <span>Port Search</span>
-          <input id="port-input" type="text" inputmode="numeric" placeholder="Enter a port number" />
+          <input id="port-input" type="text" inputmode="numeric" placeholder="Enter an exact port number" />
         </label>
         <div class="button-group">
+          <button id="search-button" type="button">Search</button>
           <button id="clear-button" type="button">Clear</button>
-          <button id="refresh-button" type="button">Refresh</button>
         </div>
       </section>
 
       <section class="meta-strip">
-        <div id="summary-text">Waiting for data...</div>
+        <div id="summary-text">Waiting for search input...</div>
         <div id="status-text">Ready.</div>
       </section>
 
@@ -268,6 +327,11 @@ class PortInspectorPanelController {
   </body>
 </html>`;
   }
+}
+
+function normalizePortQuery(value) {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return /^\d+$/.test(trimmed) ? trimmed : "";
 }
 
 function activate(context) {

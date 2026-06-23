@@ -1,7 +1,8 @@
-.vscode/**
+﻿.vscode/**
 .vscode-test/**
 .git/**
 .github/**
 node_modules/**
+.npm-cache/**
 *.vsix
 *.code-workspace

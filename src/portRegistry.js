@@ -120,6 +120,10 @@ function splitEndpoint(endpoint) {
   };
 }
 
+function normalizePortQuery(value) {
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 function sortRecords(records) {
   return [...records].sort((left, right) => {
     if (left.port !== right.port) {
@@ -332,19 +336,20 @@ async function canUseWindowsInterop() {
   return cachedWindowsInteropAvailable;
 }
 
-async function listPortRecords(target, runtimeContext = {}) {
+async function listPortRecords(target, runtimeContext = {}, query = {}) {
   const activeTarget = target || (await resolveEnvironmentSelection(runtimeContext)).activeTarget;
+  const portQuery = normalizePortQuery(query.portQuery);
 
   switch (activeTarget.kind) {
     case "windows":
-      return sortRecords(await listWindowsPortRecords({ allowFallback: true }));
+      return sortRecords(await listWindowsPortRecords({ allowFallback: true, portQuery }));
     case "windows-interop":
-      return sortRecords(await listWindowsPortRecords({ allowFallback: false }));
+      return sortRecords(await listWindowsPortRecords({ allowFallback: false, portQuery }));
     case "linux":
     case "wsl-current":
-      return sortRecords(await listLinuxPortRecords(activeTarget.label));
+      return sortRecords(await listLinuxPortRecords(activeTarget.label, portQuery));
     case "wsl-remote":
-      return sortRecords(await listRemoteWslPortRecords(activeTarget.distroName));
+      return sortRecords(await listRemoteWslPortRecords(activeTarget.distroName, portQuery));
     default:
       throw new Error(`Unsupported environment target: ${activeTarget.kind}`);
   }
@@ -376,119 +381,92 @@ async function stopPortProcess(pid, target, runtimeContext = {}) {
 
 async function listWindowsPortRecords(options = {}) {
   const allowFallback = options.allowFallback !== false;
+  const portQuery = normalizePortQuery(options.portQuery);
 
   try {
-    const nativeEntries = await listWindowsPortRecordsNative();
-    if (nativeEntries.length > 0 || !allowFallback) {
-      return nativeEntries;
-    }
+    return await listWindowsPortRecordsNative(portQuery);
   } catch (error) {
     if (allowFallback) {
       return listLocalPortRecordsFallback({
         detail: getCommandFailureDetail(error),
-        failureLabel: "Windows native lookup"
+        failureLabel: "Windows native lookup",
+        portQuery
       });
     }
 
     throw new Error(`Failed to read Windows port data. ${getCommandFailureDetail(error) || error.message}`);
   }
-
-  return listLocalPortRecordsFallback({
-    detail: "Native lookup returned no rows.",
-    failureLabel: "Windows native lookup"
-  });
 }
 
-async function listWindowsPortRecordsNative() {
+async function listWindowsPortRecordsNative(portQuery) {
+  const targetPortLiteral = Number.isInteger(portQuery) && portQuery > 0 ? String(portQuery) : "$null";
   const script = `
 $ErrorActionPreference = 'SilentlyContinue'
-function Split-Endpoint($endpoint) {
-  $cleaned = [string]$endpoint
-  $index = $cleaned.LastIndexOf(':')
-  if ($index -lt 0) {
-    return [pscustomobject]@{ address = $cleaned; port = 0 }
-  }
+$targetPort = ${targetPortLiteral}
 
-  $address = $cleaned.Substring(0, $index).Trim('[', ']')
-  $portText = $cleaned.Substring($index + 1)
-  $port = 0
-  [void][int]::TryParse($portText, [ref]$port)
-
-  return [pscustomobject]@{
-    address = $address
-    port = $port
-  }
+$tcpSource = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue
+if ($null -ne $targetPort) {
+  $tcpSource = $tcpSource | Where-Object { $_.LocalPort -eq $targetPort }
 }
 
-$records = New-Object System.Collections.ArrayList
-
-foreach ($line in (netstat -ano -p tcp)) {
-  if ($line -notmatch '^\s*TCP\s+') {
-    continue
-  }
-
-  $parts = (($line -replace '^\s+', '') -split '\s+')
-  if ($parts.Length -lt 5) {
-    continue
-  }
-
-  $state = $parts[3]
-  if ($state -notmatch '^(LISTENING|渚﹀惉)$') {
-    continue
-  }
-
-  $local = Split-Endpoint $parts[1]
-  [void]$records.Add([pscustomobject]@{
-    protocol = 'TCP'
-    address = $local.address
-    port = [int]$local.port
-    state = 'LISTENING'
-    pid = [int]$parts[4]
-    dataSource = 'native'
-  })
+$udpSource = Get-NetUDPEndpoint -ErrorAction SilentlyContinue
+if ($null -ne $targetPort) {
+  $udpSource = $udpSource | Where-Object { $_.LocalPort -eq $targetPort }
 }
 
-foreach ($line in (netstat -ano -p udp)) {
-  if ($line -notmatch '^\s*UDP\s+') {
-    continue
+$tcpRecords = @(
+  $tcpSource | ForEach-Object {
+    [pscustomobject]@{
+      protocol = 'TCP'
+      address = [string]$_.LocalAddress
+      port = [int]$_.LocalPort
+      state = 'LISTENING'
+      pid = [int]$_.OwningProcess
+      dataSource = 'native'
+    }
   }
+)
 
-  $parts = (($line -replace '^\s+', '') -split '\s+')
-  if ($parts.Length -lt 4) {
-    continue
+$udpRecords = @(
+  $udpSource | ForEach-Object {
+    [pscustomobject]@{
+      protocol = 'UDP'
+      address = [string]$_.LocalAddress
+      port = [int]$_.LocalPort
+      state = 'BOUND'
+      pid = [int]$_.OwningProcess
+      dataSource = 'native'
+    }
   }
+)
 
-  $local = Split-Endpoint $parts[1]
-  [void]$records.Add([pscustomobject]@{
-    protocol = 'UDP'
-    address = $local.address
-    port = [int]$local.port
-    state = 'BOUND'
-    pid = [int]$parts[3]
-    dataSource = 'native'
-  })
-}
-
+$records = @($tcpRecords + $udpRecords)
 $processMap = @{}
-foreach ($item in $records) {
-  $pid = [int]$item.pid
-  if ($pid -le 0 -or $processMap.ContainsKey($pid)) {
+
+foreach ($pid in ($records | Select-Object -ExpandProperty pid -Unique)) {
+  if (-not $pid) {
     continue
   }
+
+  $processInfo = Get-Process -Id $pid -ErrorAction SilentlyContinue
+  $cimProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $pid" -ErrorAction SilentlyContinue
 
   $name = ''
-  $path = ''
+  $commandLine = ''
 
-  try {
-    $process = Get-Process -Id $pid -ErrorAction Stop
-    $name = $process.ProcessName
-    $path = $process.Path
-  } catch {
+  if ($processInfo) {
+    $name = $processInfo.ProcessName
   }
 
-  $processMap[$pid] = [pscustomobject]@{
+  if ($cimProcess -and $cimProcess.CommandLine) {
+    $commandLine = $cimProcess.CommandLine
+  } elseif ($processInfo -and $processInfo.Path) {
+    $commandLine = $processInfo.Path
+  }
+
+  $processMap[[int]$pid] = [pscustomobject]@{
     Name = $name
-    CommandLine = $path
+    CommandLine = $commandLine
   }
 }
 
@@ -522,16 +500,17 @@ $result | ConvertTo-Json -Depth 4 -Compress
   return normalizeJsonArray(parsed).map(finalizeRecord);
 }
 
-async function listLinuxPortRecords(environmentLabel = "Linux") {
+async function listLinuxPortRecords(environmentLabel = "Linux", portQuery = null) {
   return listLinuxPortRecordsWithRunner({
     environmentLabel,
     allowFallback: true,
     loadProcessInfo: loadLocalLinuxProcessInfo,
-    runShellCommand: command => execFileAsync("sh", ["-lc", command])
+    runShellCommand: command => execFileAsync("sh", ["-lc", command]),
+    portQuery
   });
 }
 
-async function listRemoteWslPortRecords(distroName) {
+async function listRemoteWslPortRecords(distroName, portQuery = null) {
   const runShellCommand = command => runWslShellCommand(distroName, command);
 
   return listLinuxPortRecordsWithRunner({
@@ -539,7 +518,8 @@ async function listRemoteWslPortRecords(distroName) {
     allowFallback: false,
     loadProcessInfo: (pid, fallbackProcessName) =>
       loadRemoteLinuxProcessInfo(pid, fallbackProcessName, runShellCommand),
-    runShellCommand
+    runShellCommand,
+    portQuery
   });
 }
 
@@ -558,20 +538,22 @@ async function listLinuxPortRecordsWithRunner({
   environmentLabel,
   allowFallback,
   loadProcessInfo,
-  runShellCommand
+  runShellCommand,
+  portQuery
 }) {
   try {
-    return await listLinuxWithSs(runShellCommand, loadProcessInfo);
+    return filterRecordsByPort(await listLinuxWithSs(runShellCommand, loadProcessInfo), portQuery);
   } catch (ssError) {
     try {
-      return await listLinuxWithNetstat(runShellCommand, loadProcessInfo);
+      return filterRecordsByPort(await listLinuxWithNetstat(runShellCommand, loadProcessInfo), portQuery);
     } catch (netstatError) {
       const detail = getCommandFailureDetail(netstatError) || getCommandFailureDetail(ssError);
 
       if (allowFallback) {
         return listLocalPortRecordsFallback({
           detail,
-          failureLabel: `${environmentLabel} command lookup`
+          failureLabel: `${environmentLabel} command lookup`,
+          portQuery
         });
       }
 
@@ -682,8 +664,7 @@ async function listLinuxWithNetstat(runShellCommand, loadProcessInfo) {
 
     const parts = line.split(/\s+/);
     const isTcp = parts[0].toLowerCase().startsWith("tcp");
-    const localIndex = 3;
-    const local = splitEndpoint(parts[localIndex]);
+    const local = splitEndpoint(parts[3]);
     const state = isTcp ? parts[5] : "BOUND";
     const pidProgram = isTcp ? parts[6] : parts[5];
     const owner = parseNetstatOwner(pidProgram);
@@ -799,19 +780,16 @@ function getCommandFailureDetail(error) {
     return "";
   }
 
-  return (
-    safeTrim(error.stderr) ||
-    safeTrim(error.stdout) ||
-    safeTrim(error.message)
-  );
+  return safeTrim(error.stderr) || safeTrim(error.stdout) || safeTrim(error.message);
 }
 
-async function listLocalPortRecordsFallback({ detail, failureLabel }) {
+async function listLocalPortRecordsFallback({ detail, failureLabel, portQuery = null }) {
   const hosts = buildLocalProbeHosts();
+  const probePorts = Number.isInteger(portQuery) && portQuery > 0 ? [portQuery] : FALLBACK_TCP_PORTS;
   const targets = [];
 
   for (const host of hosts) {
-    for (const port of FALLBACK_TCP_PORTS) {
+    for (const port of probePorts) {
       targets.push({ host, port });
     }
   }
@@ -843,6 +821,14 @@ async function listLocalPortRecordsFallback({ detail, failureLabel }) {
       dataSource: "fallback"
     })
   );
+}
+
+function filterRecordsByPort(records, portQuery) {
+  if (!Number.isInteger(portQuery) || portQuery <= 0) {
+    return records;
+  }
+
+  return records.filter(record => record.port === portQuery);
 }
 
 function buildLocalProbeHosts() {
